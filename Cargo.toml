@@ -1,0 +1,9 @@
+[package]
+name = "llm-from-scratch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ai-dataloader = { version = "0.6.2", features = ["tch"] }
+tch = "0.17.0"
+tiktoken-rs = "0.6.0"
