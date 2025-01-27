@@ -1,10 +1,9 @@
-use ai_dataloader::collate::TorchCollate;
-use ai_dataloader::iterable::DataLoader;
-use ai_dataloader::{Dataset, GetSample, Len};
+use attention::MultiHeadAttention;
 use std::fs;
 use tch::nn::Module;
 use tch::Tensor;
-use tiktoken_rs::CoreBPE;
+mod attention;
+mod data;
 
 fn main() {
     tch::manual_seed(123);
@@ -13,127 +12,61 @@ fn main() {
 
     let vocab_size = 50257;
     let output_dim = 256;
-    let device = tch::Device::Cpu;
+    let device = tch::Device::Cuda(0);
     let vs = tch::nn::VarStore::new(device);
+    let root = vs.root();
     let token_embedding_layer = tch::nn::embedding(
-        vs.root(),
+        &root,
         vocab_size,
         output_dim,
         tch::nn::EmbeddingConfig::default(),
     );
 
     let max_length = 4;
-    let dataloader = create_dataloader_v1(&raw_text, 8, max_length, max_length);
-    let mut data_iter = dataloader.into_iter();
+    let dataloader = data::create_dataloader_v1(&raw_text, 8, max_length, max_length);
+    let mut data_iter = dataloader
+        .into_iter()
+        .map(|(inputs, targets)| (inputs.to_device(device), targets.to_device(device)));
     let (inputs, targets) = data_iter.next().unwrap();
-    let inputs = Tensor::stack(&inputs, -1);
-    let targets = Tensor::stack(&targets, -1);
     println!("Inputs:\n{inputs}\nTargets:\n{targets}");
 
     println!("Token IDs:\n{inputs}");
-    println!("\nInputs shape:\n{}", inputs.internal_shape_as_tensor());
+    println!("\nInputs shape:\n{:?}", inputs.size());
     let token_embeddings = token_embedding_layer.forward(&inputs);
-    println!("{}", token_embeddings.internal_shape_as_tensor());
+    println!("{:?}", token_embeddings.size());
 
     let context_length = max_length as i64;
     let pos_embedding_layer = tch::nn::embedding(
-        vs.root(),
+        &root,
         context_length,
         output_dim,
         tch::nn::EmbeddingConfig::default(),
     );
     let pos_embeddings =
         pos_embedding_layer.forward(&Tensor::arange(context_length, (tch::Kind::Int, device)));
-    println!("{}", pos_embeddings.internal_shape_as_tensor());
+    println!("{:?}", pos_embeddings.size());
     let input_embeddings = token_embeddings + pos_embeddings;
-    println!("{}", input_embeddings.internal_shape_as_tensor());
-}
+    println!("{:?}", input_embeddings.size());
 
-struct GPTDatasetV1 {
-    input_ids: Vec<Vec<i32>>,
-    target_ids: Vec<Vec<i32>>,
-}
+    let inputs = Tensor::from_slice2(&[
+        &[0.43, 0.15, 0.89],
+        &[0.55, 0.87, 0.66],
+        &[0.57, 0.85, 0.64],
+        &[0.22, 0.58, 0.33],
+        &[0.77, 0.25, 0.10],
+        &[0.05, 0.80, 0.55],
+    ])
+    .to_kind(tch::Kind::Float)
+    .to_device(device);
 
-impl Len for GPTDatasetV1 {
-    fn len(&self) -> usize {
-        self.input_ids.len()
-    }
-}
+    let batch = Tensor::stack(&[inputs.copy(), inputs], 0);
+    println!("{:?}", batch.size());
 
-impl GetSample for GPTDatasetV1 {
-    type Sample = (Vec<i32>, Vec<i32>);
-    fn get_sample(&self, index: usize) -> Self::Sample {
-        (
-            self.input_ids[index].clone(),
-            self.target_ids[index].clone(),
-        )
-    }
-}
-
-impl Dataset for GPTDatasetV1 {}
-
-struct GPTDatasetV1Iter {
-    dataset: GPTDatasetV1,
-    index: usize,
-}
-
-impl Iterator for GPTDatasetV1Iter {
-    type Item = (Vec<i32>, Vec<i32>);
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.dataset.len() {
-            None
-        } else {
-            let sample = self.dataset.get_sample(self.index);
-            self.index += 1;
-            Some(sample)
-        }
-    }
-}
-
-impl IntoIterator for GPTDatasetV1 {
-    type IntoIter = GPTDatasetV1Iter;
-    type Item = (Vec<i32>, Vec<i32>);
-    fn into_iter(self) -> Self::IntoIter {
-        GPTDatasetV1Iter {
-            dataset: self,
-            index: 0,
-        }
-    }
-}
-
-impl GPTDatasetV1 {
-    pub fn new(txt: &str, tokenizer: CoreBPE, max_length: usize, stride: usize) -> Self {
-        let mut input_ids = Vec::new();
-        let mut target_ids = Vec::new();
-        let token_ids = tokenizer
-            .encode_ordinary(txt)
-            .into_iter()
-            .map(|item| item as i32)
-            .collect::<Vec<_>>();
-        for i in (0..token_ids.len() - max_length).step_by(stride) {
-            let input_chunk = &token_ids[i..i + max_length];
-            let target_chunk = &token_ids[i + 1..i + max_length + 1];
-            input_ids.push(Vec::from(input_chunk));
-            target_ids.push(Vec::from(target_chunk));
-        }
-        Self {
-            input_ids,
-            target_ids,
-        }
-    }
-}
-
-fn create_dataloader_v1(
-    txt: &str,
-    batch_size: usize,
-    max_length: usize,
-    stride: usize,
-) -> DataLoader<GPTDatasetV1, TorchCollate> {
-    let tokenizer = tiktoken_rs::get_bpe_from_model("gpt2").unwrap();
-    let dataset = GPTDatasetV1::new(txt, tokenizer, max_length, stride);
-    DataLoader::builder(dataset)
-        .collate_fn(TorchCollate)
-        .batch_size(batch_size)
-        .drop_last()
-        .build()
+    let size = batch.size();
+    let (context_length, d_in) = (size[1], size[2]);
+    let d_out = 2;
+    let mha = MultiHeadAttention::new(&root, d_in, d_out, context_length, 0., 2, false);
+    let context_vecs = mha.forward(&batch);
+    println!("{context_vecs}");
+    println!("context_vecs.shape: {:?}", context_vecs.size());
 }
