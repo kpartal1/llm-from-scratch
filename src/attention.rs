@@ -30,7 +30,7 @@ impl MultiHeadAttention {
             d_out % num_heads == 0,
             "d_out must be divisible by num_heads"
         );
-        let config = tch::nn::LinearConfig {
+        let c = tch::nn::LinearConfig {
             bias: qkv_bias,
             ..Default::default()
         };
@@ -38,9 +38,9 @@ impl MultiHeadAttention {
             d_out,
             num_heads,
             head_dim: d_out / num_heads,
-            w_query: tch::nn::linear(vs, d_in, d_out, config),
-            w_key: tch::nn::linear(vs, d_in, d_out, config),
-            w_value: tch::nn::linear(vs, d_in, d_out, config),
+            w_query: tch::nn::linear(vs, d_in, d_out, c),
+            w_key: tch::nn::linear(vs, d_in, d_out, c),
+            w_value: tch::nn::linear(vs, d_in, d_out, c),
             out_proj: tch::nn::linear(vs, d_out, d_out, tch::nn::LinearConfig::default()),
             dropout,
             mask: vs.ones("mask", &[context_length, context_length]).triu(1),

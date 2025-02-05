@@ -1,72 +1,102 @@
-use attention::MultiHeadAttention;
+use gpt::GPTConfig;
 use std::fs;
 use tch::nn::Module;
-use tch::Tensor;
+use tch::{IndexOp, Tensor};
 mod attention;
 mod data;
+mod gpt;
 
 fn main() {
+    let device = tch::Device::cuda_if_available();
+    println!("{device:?}");
     tch::manual_seed(123);
-    let raw_text =
-        fs::read_to_string("resources/the-verdict.txt").expect("Could not open the file to read.");
+    // let raw_text =
+    //     fs::read_to_string("resources/the-verdict.txt").expect("Could not open the file to read.");
 
-    let vocab_size = 50257;
-    let output_dim = 256;
-    let device = tch::Device::Cuda(0);
+    let tokenizer = tiktoken_rs::get_bpe_from_model("gpt-2").unwrap();
+    // let vocab_size = 50257;
+    // let output_dim = 256;
     let vs = tch::nn::VarStore::new(device);
     let root = vs.root();
-    let token_embedding_layer = tch::nn::embedding(
-        &root,
-        vocab_size,
-        output_dim,
-        tch::nn::EmbeddingConfig::default(),
-    );
 
-    let max_length = 4;
-    let dataloader = data::create_dataloader_v1(&raw_text, 8, max_length, max_length);
-    let mut data_iter = dataloader
+    let model = gpt::GPTModel::new(&root, GPTConfig::GPT2_XLARGE);
+
+    let start_context = "Hello, I am";
+    let encoded = tokenizer
+        .encode_ordinary(start_context)
         .into_iter()
-        .map(|(inputs, targets)| (inputs.to_device(device), targets.to_device(device)));
-    let (inputs, targets) = data_iter.next().unwrap();
-    println!("Inputs:\n{inputs}\nTargets:\n{targets}");
+        .map(|rank| rank as i32)
+        .collect::<Vec<_>>();
+    println!("encoded: {encoded:?}");
+    let encoded_tensor = Tensor::from_slice(&encoded).to_device(device).unsqueeze(0);
+    println!("type: {:?}", encoded_tensor.kind());
+    println!("encoded_tensor.shape: {:?}", encoded_tensor.size());
 
-    println!("Token IDs:\n{inputs}");
-    println!("\nInputs shape:\n{:?}", inputs.size());
-    let token_embeddings = token_embedding_layer.forward(&inputs);
-    println!("{:?}", token_embeddings.size());
+    let out = tch::no_grad(|| {
+        generate_text_simple(
+            &model,
+            encoded_tensor,
+            6,
+            GPTConfig::GPT2_124M.context_length,
+        )
+    });
+    println!("Output: {out}");
+    println!("Output length: {}", out.get(0).size()[0]);
 
-    let context_length = max_length as i64;
-    let pos_embedding_layer = tch::nn::embedding(
-        &root,
-        context_length,
-        output_dim,
-        tch::nn::EmbeddingConfig::default(),
-    );
-    let pos_embeddings =
-        pos_embedding_layer.forward(&Tensor::arange(context_length, (tch::Kind::Int, device)));
-    println!("{:?}", pos_embeddings.size());
-    let input_embeddings = token_embeddings + pos_embeddings;
-    println!("{:?}", input_embeddings.size());
+    let decoded_text = tokenizer
+        .decode(
+            out.squeeze()
+                .iter::<i64>()
+                .unwrap()
+                .map(|i| i as u32)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    println!("{decoded_text}");
+}
 
-    let inputs = Tensor::from_slice2(&[
-        &[0.43, 0.15, 0.89],
-        &[0.55, 0.87, 0.66],
-        &[0.57, 0.85, 0.64],
-        &[0.22, 0.58, 0.33],
-        &[0.77, 0.25, 0.10],
-        &[0.05, 0.80, 0.55],
-    ])
-    .to_kind(tch::Kind::Float)
-    .to_device(device);
+fn generate_text_simple(
+    model: &impl Module,
+    idx: Tensor,
+    max_new_tokens: i64,
+    context_size: i64,
+) -> Tensor {
+    let mut idx = idx;
+    for _ in 0..max_new_tokens {
+        let seq_len = idx.size()[1];
+        let start_token_index = 0.max(seq_len - context_size);
+        let idx_cond = idx.i((.., start_token_index..));
+        let logits = tch::no_grad(|| model.forward(&idx_cond));
+        let logits = logits.i((.., -1, ..));
+        let probas = logits.softmax(-1, logits.kind());
 
-    let batch = Tensor::stack(&[inputs.copy(), inputs], 0);
-    println!("{:?}", batch.size());
+        let idx_next = probas.argmax(-1, true);
+        idx = Tensor::cat(&[idx, idx_next], 1);
+    }
+    idx
+}
 
-    let size = batch.size();
-    let (context_length, d_in) = (size[1], size[2]);
-    let d_out = 2;
-    let mha = MultiHeadAttention::new(&root, d_in, d_out, context_length, 0., 2, false);
-    let context_vecs = mha.forward(&batch);
-    println!("{context_vecs}");
-    println!("context_vecs.shape: {:?}", context_vecs.size());
+fn print_gradients(vs: &tch::nn::VarStore, model: &impl Module, x: &Tensor) {
+    let output = model.forward(x);
+    let target = Tensor::from_slice2(&[[0.]])
+        .to_kind(tch::Kind::Float)
+        .to_device(vs.device());
+
+    let loss = output.mse_loss(&target, tch::Reduction::Mean);
+
+    loss.backward();
+
+    let mut variables = vs
+        .variables()
+        .into_iter()
+        .filter(|(s, p)| s.contains("weight") && p.grad().defined())
+        .collect::<Vec<_>>();
+    variables.sort_unstable_by(|(s1, _), (s2, _)| s1.cmp(s2));
+
+    for (name, param) in variables {
+        println!(
+            "{name} has gradient mean of {}",
+            param.grad().abs().mean(tch::Kind::Float)
+        );
+    }
 }
