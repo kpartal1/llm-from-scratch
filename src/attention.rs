@@ -1,5 +1,5 @@
 use tch::{
-    nn::{Linear, Module},
+    nn::{Linear, Module, ModuleT},
     Tensor,
 };
 
@@ -48,8 +48,8 @@ impl MultiHeadAttention {
     }
 }
 
-impl Module for MultiHeadAttention {
-    fn forward(&self, xs: &Tensor) -> Tensor {
+impl ModuleT for MultiHeadAttention {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> Tensor {
         let size = xs.size();
         let (b, num_tokens) = (size[0], size[1]);
 
@@ -69,7 +69,7 @@ impl Module for MultiHeadAttention {
 
         let attn_weights = (attn_scores / (*keys.size().last().unwrap() as f64).sqrt())
             .softmax(-1, tch::Kind::Float)
-            .dropout(self.dropout, true);
+            .dropout(self.dropout, train);
 
         let context_vec = (attn_weights.matmul(&values))
             .transpose(1, 2)

@@ -1,5 +1,5 @@
 use tch::{
-    nn::{Embedding, Linear, Module, Sequential},
+    nn::{Embedding, Linear, Module, ModuleT, Sequential, SequentialT},
     Tensor,
 };
 
@@ -36,7 +36,7 @@ impl GPTConfig {
             qkv_bias,
         }
     }
-    pub const GPT2_124M: GPTConfig = GPTConfig::new(50_257, 1_024, 768, 12, 12, 0.1, false);
+    pub const GPT2_124M: GPTConfig = GPTConfig::new(50_257, 256, 768, 12, 12, 0.1, false);
     pub const GPT2_MEDIUM: GPTConfig = GPTConfig::new(50_257, 1_024, 1_024, 16, 24, 0.1, false);
     pub const GPT2_LARGE: GPTConfig = GPTConfig::new(50_257, 1_024, 1_280, 20, 36, 0.1, false);
     pub const GPT2_XLARGE: GPTConfig = GPTConfig::new(50_257, 1_024, 1_600, 25, 48, 0.1, false);
@@ -130,18 +130,18 @@ impl TransformerBlock {
     }
 }
 
-impl Module for TransformerBlock {
-    fn forward(&self, xs: &Tensor) -> Tensor {
+impl ModuleT for TransformerBlock {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> Tensor {
         let mut shortcut = xs.copy();
         let mut x = self.norm1.forward(xs);
-        x = self.att.forward(&x);
-        x = x.dropout(self.drop_shortcut, true);
+        x = self.att.forward_t(&x, train);
+        x = x.dropout(self.drop_shortcut, train);
         x = &x + shortcut;
 
         shortcut = x.copy();
         x = self.norm2.forward(&x);
         x = self.ff.forward(&x);
-        x = x.dropout(self.drop_shortcut, true);
+        x = x.dropout(self.drop_shortcut, train);
         x = &x + shortcut;
         x
     }
@@ -152,14 +152,14 @@ pub struct GPTModel {
     tok_emb: Embedding,
     pos_emb: Embedding,
     drop_emb: f64,
-    trf_blocks: Sequential,
+    trf_blocks: SequentialT,
     final_norm: LayerNorm,
     out_head: Linear,
 }
 
 impl GPTModel {
     pub fn new(vs: &tch::nn::Path, cfg: GPTConfig) -> Self {
-        let mut trf_blocks = tch::nn::seq();
+        let mut trf_blocks = tch::nn::seq_t();
         for _ in 0..cfg.n_layers {
             trf_blocks = trf_blocks.add(TransformerBlock::new(vs, cfg));
         }
@@ -179,8 +179,8 @@ impl GPTModel {
     }
 }
 
-impl Module for GPTModel {
-    fn forward(&self, xs: &Tensor) -> Tensor {
+impl ModuleT for GPTModel {
+    fn forward_t(&self, xs: &Tensor, train: bool) -> Tensor {
         let seq_len = xs.size()[1];
         let tok_embeds = self.tok_emb.forward(xs);
 
@@ -188,8 +188,8 @@ impl Module for GPTModel {
             .pos_emb
             .forward(&Tensor::arange(seq_len, (xs.kind(), xs.device())));
         let mut x = tok_embeds + pos_embeds;
-        x = x.dropout(self.drop_emb, true);
-        x = self.trf_blocks.forward(&x);
+        x = x.dropout(self.drop_emb, train);
+        x = self.trf_blocks.forward_t(&x, train);
         x = self.final_norm.forward(&x);
         let logits = self.out_head.forward(&x);
         #[allow(clippy::let_and_return)]

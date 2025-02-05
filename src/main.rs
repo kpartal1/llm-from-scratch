@@ -1,6 +1,6 @@
 use gpt::GPTConfig;
 use std::fs;
-use tch::nn::Module;
+use tch::nn::{Module, ModuleT};
 use tch::{IndexOp, Tensor};
 mod attention;
 mod data;
@@ -19,7 +19,7 @@ fn main() {
     let vs = tch::nn::VarStore::new(device);
     let root = vs.root();
 
-    let model = gpt::GPTModel::new(&root, GPTConfig::GPT2_XLARGE);
+    let model = gpt::GPTModel::new(&root, GPTConfig::GPT2_124M);
 
     let start_context = "Hello, I am";
     let encoded = tokenizer
@@ -32,14 +32,13 @@ fn main() {
     println!("type: {:?}", encoded_tensor.kind());
     println!("encoded_tensor.shape: {:?}", encoded_tensor.size());
 
-    let out = tch::no_grad(|| {
-        generate_text_simple(
-            &model,
-            encoded_tensor,
-            6,
-            GPTConfig::GPT2_124M.context_length,
-        )
-    });
+    let out = generate_text_simple(
+        &model,
+        encoded_tensor,
+        6,
+        GPTConfig::GPT2_124M.context_length,
+        false,
+    );
     println!("Output: {out}");
     println!("Output length: {}", out.get(0).size()[0]);
 
@@ -56,17 +55,18 @@ fn main() {
 }
 
 fn generate_text_simple(
-    model: &impl Module,
+    model: &impl ModuleT,
     idx: Tensor,
     max_new_tokens: i64,
     context_size: i64,
+    train: bool,
 ) -> Tensor {
     let mut idx = idx;
     for _ in 0..max_new_tokens {
         let seq_len = idx.size()[1];
         let start_token_index = 0.max(seq_len - context_size);
         let idx_cond = idx.i((.., start_token_index..));
-        let logits = tch::no_grad(|| model.forward(&idx_cond));
+        let logits = model.forward_t(&idx_cond, train);
         let logits = logits.i((.., -1, ..));
         let probas = logits.softmax(-1, logits.kind());
 
